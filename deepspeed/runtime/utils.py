@@ -968,9 +968,11 @@ def all_gather_into_tensor_dp_groups(groups_flat, partitioned_param_groups, dp_p
             continue
         dist.all_gather_into_tensor(group_flat, partitioned_params[partition_id], dp_process_group[group_id])
 
-
+# Gather partitioned updated parameters across data parallel groups.
 def all_gather_dp_groups(groups_flat, partitioned_param_groups, dp_process_group, start_alignment_factor,
                          allgather_bucket_size):
+    
+    # modern versions of pytorch support all_gather_into_tensor
     if dist.has_all_gather_into_tensor():
         return all_gather_into_tensor_dp_groups(groups_flat, partitioned_param_groups, dp_process_group)
 

@@ -94,7 +94,7 @@ def _pad_tensor_by_size(src_tensor, pad_size, dtype, device):
     padded_tensor.data[:src_tensor.numel()].copy_(src_tensor.data)
     return padded_tensor
 
-
+# This is a DeepSpeed ZeRO-1 and ZeRO-2 optimizer implementation.
 class DeepSpeedZeroOptimizer(ZeROOptimizer):
     """
     DeepSpeedZeroOptimizer designed to reduce the memory footprint
@@ -107,6 +107,37 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     """
 
+    # init_optimizer: the optimizer to be wrapped by this ZeRO optimizer
+    # param_names: a dictionary mapping parameters to their names
+    # timers: a dictionary to store timers for various operations
+    # static_loss_scale: a static loss scale to be used for loss scaling
+    # dynamic_loss_scale: whether to use dynamic loss scaling
+    # dynamic_loss_args: arguments for dynamic loss scaling
+    # verbose: whether to print verbose logs
+    # contiguous_gradients: whether to use contiguous gradients
+    # reduce_bucket_size: size of the bucket for reducing gradients
+    # use_multi_rank_bucket_allreduce: whether to use multi-rank bucket allreduce
+    # allgather_bucket_size: size of the bucket for allgather operation
+    # dp_process_group: the data parallel process group
+    # expert_parallel_group: the expert parallel process group
+    # expert_data_parallel_group: the expert data parallel data parallel process group
+    # reduce_scatter: whether to use reduce scatter operation or all-reduce
+    # overlap_comm: whether to overlap communication with computation
+    # offload_optimizer_config: configuration for offloading optimizer states to CPU
+    # mpu: model parallel unit, used for model parallel training
+    # clip_grad: gradient clipping value
+    # gradient_accumulation_dtype: the dtype to use for gradient accumulation
+    # communication_data_type: the dtype to use for communication
+    # postscale_gradients: whether to postscale gradients
+    # gradient_predivide_factor: factor to predivide gradients by
+    # gradient_accumulation_steps: number of gradient accumulation steps
+    # ignore_unused_parameters: whether to ignore unused parameters in the optimizer
+    # partition_grads: whether to partition gradients across data parallel ranks
+    # round_robin_gradients: whether to use round-robin gradient partitioning
+    # has_moe_layers: whether the model has MoE layers
+    # fp16_master_weights_and_gradients: whether to keep master weights and gradients in fp16
+    # elastic_checkpoint: whether to enable elastic checkpointing
+    # check_grad_overflow: whether to check for gradient overflow
     def __init__(self,
                  init_optimizer,
                  param_names,
@@ -181,6 +212,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.reduce_scatter = reduce_scatter
 
+        # whether to overlap communication with backward pass, use separete communication stream
         self.overlap_comm = overlap_comm
 
         self.deepspeed_adam_offload = self.cpu_offload
@@ -203,6 +235,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.real_dp_process_group = [dp_process_group for i in range(len(self.optimizer.param_groups))]
         self.partition_count = [dp_size for i in range(len(self.optimizer.param_groups))]
 
+        # Flag to track if the current step is a gradient accumulation boundary.
         self.is_gradient_accumulation_boundary = True
 
         # CPU-Offload requires contiguous gradients
@@ -232,6 +265,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.ignore_unused_parameters = ignore_unused_parameters
         self.round_robin_gradients = round_robin_gradients
 
+        # Placeholder for parameters that are too large for standard bucketing
         self.extra_large_param_to_reduce = None
         self.fp16_master_weights_and_gradients = fp16_master_weights_and_gradients
 
@@ -248,12 +282,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             assert self.postscale_gradients, f"pre-scale gradients is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
 
         # param flattened by groups
+        # Stores the original 16-bit parameters, grouped by optimizer param groups.
         self.bit16_groups = []
+        # Stores the flattened version of bit16_groups.
         self.bit16_groups_flat = []
 
         # param partitioned by data parallel degree
         # this will contain a list of equal sized tensors
         # each of which will be updated by a different process
+        # Stores partitions of bit16_groups_flat
         self.parallel_partitioned_bit16_groups = []
 
         # a single 32-bit partition of the parallel partitioned parameters
@@ -287,6 +324,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             allgather_bucket_size % self.nccl_start_alignment_factor == 0
         ), f"allgather_bucket_size must be a multiple of nccl_start_alignment_factor, {self.nccl_start_alignment_factor} "
 
+        # useless
         self.all_reduce_print = False
         self.dtype = self.optimizer.param_groups[0]['params'][0].dtype
         self.gradient_accumulation_dtype = gradient_accumulation_dtype
@@ -300,8 +338,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         else:
             self.use_grad_accum_attribute = False
 
+        # Stores parameters reordered for round-robin partitioning
         self.round_robin_bit16_groups = []
+        # Stores indices of the parameters in the original bit16_groups
         self.round_robin_bit16_indices = []
+        # Stores meta tensors for the round-robin parameters
         self.round_robin_bit16_meta = []
 
         # Use different parallel to do all_to_all_reduce related things
@@ -319,6 +360,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     param.grad_accum = None
                     param.param_idx_in_group = len(trainable_parameters)
                     trainable_parameters.append(param)
+            # Filter out parameters that do not require gradients and add them to the group
             self.bit16_groups.append(trainable_parameters)
 
             # not sure why apex was cloning the weights before flattening
@@ -352,6 +394,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.round_robin_bit16_indices.append(round_robin_indices)
 
             # Create meta tensors list, ordered according to round_robin_tensors
+            # https://docs.pytorch.org/docs/stable/meta.html
             meta_tensors = []
             for param in round_robin_tensors:
                 meta_tensors.append(torch.zeros_like(param.cpu_data, device="meta"))
@@ -445,6 +488,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.use_multi_rank_bucket_allreduce = use_multi_rank_bucket_allreduce
         self.allgather_bucket_size = int(allgather_bucket_size)
 
+        # create a separate stream for reduction
         self.reduction_stream = None if get_accelerator().is_synchronized_device() else get_accelerator().Stream()
         #self.copy_grad_stream = get_accelerator().Stream()
         self.callback_queued = False
@@ -961,6 +1005,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         )
 
     # create a flat tensor aligned at the alignment boundary
+
     def flatten_dense_tensors_aligned(self, tensor_list, alignment, use_cpu_data=False):
         tensor_list = [param.cpu_data for param in tensor_list] if use_cpu_data else tensor_list
         return self.flatten(align_dense_tensors(tensor_list, alignment))
@@ -1084,6 +1129,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.overlap_comm:
             stream = self.reduction_stream
             if not get_accelerator().resolves_data_dependency():
+                # wait for the completion of computation before starting reduction
+                # and wait for the completion of reduction before starting computation
+                # this is needed to avoid deadlocks in case of multiple streams
+                # and to ensure that the reduction is done before the next backward pass
                 stream.wait_stream(get_accelerator().current_stream())
                 get_accelerator().current_stream().wait_stream(stream)
         else:
