@@ -238,6 +238,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # Flag to track if the current step is a gradient accumulation boundary.
         self.is_gradient_accumulation_boundary = True
 
+        # Important performance improve, move gradient to ipg_buffer for reduce
         # CPU-Offload requires contiguous gradients
         self.contiguous_gradients = contiguous_gradients or self.cpu_offload
 
@@ -329,10 +330,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.dtype = self.optimizer.param_groups[0]['params'][0].dtype
         self.gradient_accumulation_dtype = gradient_accumulation_dtype
 
+        # when dtype is not equal to accumulate_dtype, use a separate grad accum, default to true
         if self.dtype != self.gradient_accumulation_dtype:
             self.use_separate_grad_accum = True
         else:
             self.use_separate_grad_accum = False
+
+        # only zero1 need grad accum attribute, as zero2 reduce gradient every micro-batch
         if self.use_separate_grad_accum and not self.partition_gradients:
             self.use_grad_accum_attribute = True
         else:
@@ -453,6 +457,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].to(
                     self.device).clone().half().detach()
 
+            # cpu offload logic
             if self.cpu_offload:
                 weights_partition = get_accelerator().pin_memory(weights_partition)
                 temp_dtype = self.parallel_partitioned_bit16_groups[i][partition_id].dtype
@@ -476,6 +481,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             param_group['params'] = [self.single_partition_of_fp32_groups[i]]
 
             partition_size = len(self.bit16_groups_flat[i]) / dist.get_world_size(group=self.real_dp_process_group[i])
+
+            # manage in partition and not in partition params
             params_in_partition, params_not_in_partition, first_offset = self.get_partition_info(
                 self.round_robin_bit16_groups[i], partition_size, partition_id)
 
@@ -485,6 +492,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.first_offset.append(first_offset)
 
         self.reduce_bucket_size = int(reduce_bucket_size)
+        # multi_rank_bucket_allreduce group gradients for multiple ranks into a single, larger buckets
+        # for performance, default to true, call reduce_and_scatter
         self.use_multi_rank_bucket_allreduce = use_multi_rank_bucket_allreduce
         self.allgather_bucket_size = int(allgather_bucket_size)
 
@@ -498,7 +507,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # map between param_id and bool to specify if a param is in this partition
         self.is_param_in_current_partition = {}
 
+        # grads in bucket for communication, ipg stands for independent partition gradient
         self.grads_in_ipg_bucket = []
+        # one to one metadata of grad
         self.params_in_ipg_bucket = []
         self.elements_in_ipg_bucket = 0
         self.params_already_reduced = []
@@ -1016,6 +1027,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         grad_reduc = self.get_gradient_for_reduction(param)
         if self.elements_in_ipg_bucket + param.numel() > self.reduce_bucket_size:
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel())
+            # when bucket is full, reduce it
             self.reduce_ipg_grads()
             if self.contiguous_gradients and self.overlap_comm:
                 # Swap ipg_index between 0 and 1
@@ -1128,6 +1140,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def average_tensor(self, tensor):
         if self.overlap_comm:
             stream = self.reduction_stream
+            # default to false in both cuda and xpu
             if not get_accelerator().resolves_data_dependency():
                 # wait for the completion of computation before starting reduction
                 # and wait for the completion of reduction before starting computation
@@ -1139,6 +1152,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
+            # use all_reduce, poor performance then reduce_scatter
             if not self.reduce_scatter:
                 self.gradient_reduction_w_predivide(tensor)
                 return
@@ -1448,6 +1462,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def reduce_ipg_grads(self):
         if self.contiguous_gradients:
+            # when one param fill full bucket
             if self.extra_large_param_to_reduce is not None:
                 assert len(self.params_in_ipg_bucket) == 1, "more than 1 param in ipg bucket, this shouldn't happen"
                 _, _, param_id = self.params_in_ipg_bucket[0]
@@ -1457,8 +1472,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.average_tensor(extra_large_grad_reduc.view(-1))
                 self.extra_large_param_to_reduce = None
             else:
+                # narrow to real elements in bucket
                 self.average_tensor(self.ipg_buffer[self.ipg_index].narrow(0, 0, self.elements_in_ipg_bucket))
         else:
+            # when grad is not contiguous, reduce them one by one
             self.buffered_reduce_fallback(None,
                                           self.grads_in_ipg_bucket,
                                           elements_per_buffer=self.elements_in_ipg_bucket)
@@ -1509,10 +1526,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.backward_prologue()
         if self.use_grad_accum_attribute:
             self._fill_param_grad_accum_attribute(param)
+        # zero2 or overlap in zero1
         if self.partition_gradients or self.overlap_comm:
             self.reduce_ready_partitions_and_remove_grads(param, i)
 
     def reduce_ready_partitions_and_remove_grads(self, param, i):
+        # for zero2, every micro-batch need reduce gradient
         if self.partition_gradients or self.is_gradient_accumulation_boundary:
             self.reduce_independent_p_g_buckets_and_remove_grads(param, i)
 
@@ -2118,6 +2137,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.micro_step_id += 1
             if self.contiguous_gradients and self.ipg_buffer is None:
                 self.ipg_buffer = []
+                # create ipg butter
                 buf_0 = torch.empty(int(self.reduce_bucket_size),
                                     dtype=self.dtype,
                                     device=get_accelerator().current_device_name())

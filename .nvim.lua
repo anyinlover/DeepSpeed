@@ -1,6 +1,7 @@
 -- Disable diagnostics for this project
 vim.diagnostic.enable(false)
 
-vim.g.project_conform_opts = {
+local conform = require("conform")
+conform.setup({
 	format_on_save = false,
-}
+})
