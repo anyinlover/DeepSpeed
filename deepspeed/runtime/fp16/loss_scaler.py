@@ -126,13 +126,23 @@ class DynamicLossScaler(LossScalerBase):
                  raise_error_at_min_scale=True,
                  dtype=torch.half):
         super(DynamicLossScaler, self).__init__(init_scale)
+        # counter for the current iteration, used with scale window to increase scale
         self.cur_iter = 0
+        # last time overflow happen, hysteresis logic for preventing the scale
+        # from increasing too quickly after an overflow
         self.last_overflow_iter = -1
+        # factor for loss multiplied or divided, typically set to 2.0
         self.scale_factor = 2.0
+        # the number of successful iterations pass before scale is increased
         self.scale_window = scale_window
+        # the minimum value the loss scale can be
         self.min_scale = min_scale
+        # It determines the number of iterations to wait after overflow
+        # before attempting to increase the loss scale, as the initial value
         self.delayed_shift = delayed_shift
+        # The cur value of the number of iterations to wait
         self.cur_hysteresis = delayed_shift
+        # whether the hysteresis window will be reset to delayed_shift after a increase
         self.consecutive_hysteresis = consecutive_hysteresis
         self.raise_error_at_min_scale = raise_error_at_min_scale
         self.dynamic = True

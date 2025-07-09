@@ -61,6 +61,7 @@ def split_half_float_double(tensors):
     return buckets
 
 
+# API for check two tensor is close
 def isclose(a, b, rtol=1e-09, atol=0.0):
     return abs(a - b) <= max(rtol * max(abs(a), abs(b)), atol)
 
@@ -282,6 +283,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             assert self.gradient_predivide_factor == 1.0, f"gradient_predivide_factor != 1.0 is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
             assert self.postscale_gradients, f"pre-scale gradients is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
 
+        # API for param group
         # param flattened by groups
         # Stores the original 16-bit parameters, grouped by optimizer param groups.
         self.bit16_groups = []
@@ -352,6 +354,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # Use different parallel to do all_to_all_reduce related things
         # padding on each partition for alignment purposes
         self.groups_padding = []
+        # In engine call, only one param group for all model params
         # loop to deal with groups
         for i, param_group in enumerate(self.optimizer.param_groups):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
@@ -638,6 +641,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.cpu_offload:
             self._create_optimizer_mapping()
 
+    # API for destroy optimizer
     def destroy(self):
         for i, _ in enumerate(self.optimizer.param_groups):
             for p in self.bit16_groups[i]:
@@ -790,6 +794,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     #########################################################################
     #################### ZeRO Stage 1 - reduce gradients ####################
     #########################################################################
+    # API for reduce gradient in last
     def reduce_gradients(self, pipeline_parallel=False):
         world_size = dist.get_world_size(self.dp_process_group)
         my_rank = dist.get_rank(self.dp_process_group)
@@ -958,6 +963,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             current_index = current_index + param_size
 
+    # API for reduce epilogue
     def overlapping_partition_gradients_reduce_epilogue(self):
         self.independent_gradient_partition_epilogue()
 
@@ -1875,15 +1881,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.norm_for_param_grads = {}
         self.local_overflow = False
 
+    # API for set learning rate
     def set_lr(self, lr):
         """Set the learning rate."""
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
 
+    # API for get learning rate
     def get_lr(self):
         """Return the current learning rate."""
         return self.optimizer.param_groups[0]["lr"]
 
+    # API for overrid loss scale
     def override_loss_scale(self, loss_scale):
         if loss_scale != self.external_loss_scale:
             logger.info(f'[deepspeed] setting loss scale from {self.external_loss_scale} -> {loss_scale}')
@@ -1926,6 +1935,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # We need to link optimizer state after the first step() call
         self._lazy_init_hp_params_optimizer_state()
 
+        # API for optimzier step
     def step(self, closure=None):
         """
         Not supporting closure.
@@ -1939,9 +1949,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.check_overflow(partition_gradients=self.partition_gradients)
 
         prev_scale = self.loss_scale
+        # update loss scale based on overflow
         self._update_scale(self.overflow)
         if self.overflow:
             see_memory_usage('After overflow before clearing gradients')
+            # clear grad to None or zero
             self.zero_grad(set_to_none=True)
             if self.cpu_offload:
                 self.reset_cpu_buffers()
@@ -2157,6 +2169,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.use_grad_accum_attribute:
             self.fill_grad_accum_attribute()
 
+    # API for backward
     def backward(self, loss, retain_graph=False):
         """
         :attr:`backward` performs the following steps:
@@ -2186,6 +2199,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _set_state(self, value):
         self.optimizer.state = value
 
+    # API of state property
     state = property(_get_state, _set_state)
 
     # Promote param_groups so it can be retrieved or set via "fp16_optimizer_instance.param_groups"
@@ -2196,6 +2210,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _set_param_groups(self, value):
         self.optimizer.param_groups = value
 
+    # API of param_groups property
     param_groups = property(_get_param_groups, _set_param_groups)
 
     # Promote loss scale so it can be retrieved or set via "fp16_optimizer_instance.loss_scale"
@@ -2208,7 +2223,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _set_loss_scale(self, value):
         self.loss_scaler.cur_scale = value
 
+    # API of loss_scale property
     loss_scale = property(_get_loss_scale, _set_loss_scale)
+    # API of cur_scale property
     cur_scale = property(_get_loss_scale, _set_loss_scale)
 
     # Return group tensor after removing paddings that are added for alignment to DP world size.
@@ -2244,6 +2261,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         return optimizer_groups_state
 
+    # API for return state of optimizer
     def state_dict(self):
         """
         Returns a dict containing the current state of this :class:`FP16_Optimizer` instance.
@@ -2315,6 +2333,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             partition_id = dist.get_rank(group=self.real_dp_process_group[group_id])
             fp32_partition.data.copy_(bit16_partitions[partition_id].data)
 
+    # API for refresh the fp32 master params
     # Refresh the fp32 master params from the fp16 or bfloat16 copies.
     def refresh_fp32_params(self):
         self._restore_from_bit16_weights()
@@ -2394,6 +2413,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._restore_base_optimizer_state(base_optimizer_group_states,
                                            self._restore_step_from_elastic_checkpoint(all_state_dict), None)
 
+    # API for load state dict
     def load_state_dict(self,
                         state_dict_list,
                         load_optimizer_states=True,
@@ -2556,6 +2576,7 @@ def model_to_params(model):
     return total_params
 
 
+# API for estimate memory need for zero2
 def estimate_zero2_model_states_mem_needs_all_live(model,
                                                    num_gpus_per_node=1,
                                                    num_nodes=1,
