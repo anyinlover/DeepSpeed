@@ -134,6 +134,7 @@ def initialize(args=None,
              ranks=[0])
 
     # Disable zero.Init context if it's currently enabled
+    # GUTODO analysis in zero3
     zero.partition_parameters.shutdown_init_context()
 
     assert model is not None, "deepspeed.initialize requires a model"
